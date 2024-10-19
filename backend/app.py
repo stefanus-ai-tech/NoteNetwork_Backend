@@ -1,16 +1,16 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
-from backend.models import User
+from .models import User
 from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
-from backend.config import Config
+from .config import Config
 import os
 from flask_cors import CORS
 
 # Initialize the Flask application
 app = Flask(__name__)
 app.config.from_object(Config)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "https://your-frontend.vercel.app"}})
 
 # Initialize LoginManager
 login_manager = LoginManager()
