@@ -8,6 +8,7 @@ from backend.config import Config
 # Initialize the Flask application
 app = Flask(__name__)
 app.config.from_object(Config)
+CORS(app)
 
 # Initialize LoginManager
 login_manager = LoginManager()
@@ -154,5 +155,5 @@ def page_not_found(e):
 
 # Run the application
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
-
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
