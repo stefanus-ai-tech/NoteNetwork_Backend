@@ -4,6 +4,8 @@ from backend.models import User
 from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
 from backend.config import Config
+import os
+from flask_cors import CORS
 
 # Initialize the Flask application
 app = Flask(__name__)
