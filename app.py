@@ -6,9 +6,6 @@ import logging
 import datetime
 import jwt
 from flask_cors import CORS
-import sqlite3
-
-# Database imports
 import psycopg2
 import psycopg2.extras
 import sqlite3
@@ -16,6 +13,12 @@ from urllib.parse import urlparse
 
 # Initialize logging
 logging.basicConfig(level=logging.DEBUG)
+
+# Initialize the Flask application
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_secret_key')
+CORS(app, resources={r"/*": {"origins": "https://note-network-frontend.vercel.app"}})
+
 
 # Initialize the Flask application
 app = Flask(__name__)
@@ -270,7 +273,36 @@ def page_not_found(e):
 def internal_server_error(e):
     return jsonify({'message': 'Internal server error'}), 500
 
-# Run the application
+def init_postgres_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL
+    )
+    ''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS vacancies (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        school_name TEXT NOT NULL,
+        user_id INTEGER REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
 if __name__ == '__main__':
+    if os.environ.get('ENV') == 'production':
+        init_postgres_db()
     port = int(os.environ.get('PORT', 8000))
     app.run(host='0.0.0.0', port=port, debug=True)
+
