@@ -1,80 +1,144 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
-from flask_login import LoginManager, login_user, login_required, logout_user, current_user
-from .models import User
+from flask import Flask, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3
-from .config import Config
+from functools import wraps
 import os
-from flask_cors import CORS
-import psycopg2
-import jwt
+import logging
 import datetime
+import jwt
+from flask_cors import CORS
+import sqlite3
+
+# Database imports
+import psycopg2
+import psycopg2.extras
+import sqlite3
+from urllib.parse import urlparse
+
+# Initialize logging
+logging.basicConfig(level=logging.DEBUG)
 
 # Initialize the Flask application
 app = Flask(__name__)
-app.config.from_object(Config)
-CORS(app, resources={r"/*": {"origins": "https://note-network-frontend.vercel.app/"}})
-
-# Initialize LoginManager
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_secret_key')
+CORS(app, resources={r"/*": {"origins": "https://note-network-frontend.vercel.app"}})
 
 # Database connection function
-import psycopg2
-
 def get_db_connection():
-    conn = psycopg2.connect(
-        host=os.environ.get('PGHOST'),
-        database=os.environ.get('PGDATABASE'),
-        user=os.environ.get('PGUSER'),
-        password=os.environ.get('PGPASSWORD'),
-        port=os.environ.get('PGPORT', 5432)
-    )
-    conn.autocommit = True  # Ensure auto-commit mode
+    db_path = os.path.join(os.path.dirname(__file__), 'database.db')  # Ensure correct path
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     return conn
 
+# Database helper class
+class DatabaseHelper:
+    def __init__(self):
+        self.env = os.environ.get('ENV', 'development')
+        self.conn = get_db_connection()
+        if self.env == 'production':
+            self.cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            self.param_style = 'pyformat'  # For psycopg2
+        else:
+            self.cursor = self.conn.cursor()
+            self.param_style = 'named'  # For sqlite3
 
-# User loader callback
-@login_manager.user_loader
-def load_user(user_id):
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
-    conn.close()
-    if user:
-        return User(user['id'], user['username'], user['email'], user['role'])
-    return None
+    def execute(self, query, params=None):
+        if params is None:
+            params = {}
+        if self.env == 'production':
+            # Convert named parameters to psycopg2 format
+            # Replace :param with %(param)s
+            import re
+            query = re.sub(r":(\w+)", r"%(\1)s", query)
+        self.cursor.execute(query, params)
+
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        if row and self.env == 'development':
+            return dict(row)
+        return row
+
+    def fetchall(self):
+        rows = self.cursor.fetchall()
+        if rows and self.env == 'development':
+            return [dict(row) for row in rows]
+        return rows
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.cursor.close()
+        self.conn.close()
+
+# User class
+class User:
+    def __init__(self, id, username, email, role):
+        self.id = id
+        self.username = username
+        self.email = email
+        self.role = role
+
+# Token required decorator
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        # Check if token is passed in headers
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            parts = auth_header.split()
+            if len(parts) == 2 and parts[0] == 'Bearer':
+                token = parts[1]
+        if not token:
+            return jsonify({'message': 'Token is missing!'}), 401
+        try:
+            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            current_user = User(data['user_id'], data.get('username'), data.get('email'), data['role'])
+        except Exception as e:
+            return jsonify({'message': 'Token is invalid!'}), 401
+        return f(current_user, *args, **kwargs)
+    return decorated
 
 # Routes
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return jsonify({'message': 'Welcome to the Note Network API'}), 200
 
-@app.route('/register', methods=('GET', 'POST'))
+@app.route('/register', methods=['POST'])
 def register():
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))
-    if request.method == 'POST':
-        username = request.form['username']
-        email = request.form['email']
-        password = request.form['password']
-        role = request.form['role']  # 'poster' or 'jobseeker'
+    data = request.get_json()
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role')
 
-        conn = get_db_connection()
-        existing_user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+    if not username or not email or not password or not role:
+        return jsonify({'message': 'Missing required fields.'}), 400
+
+    try:
+        db = DatabaseHelper()
+        logging.debug(f"Registering user: {username}, {email}, {role}")
+
+        # Use named parameters
+        db.execute('SELECT * FROM users WHERE email = :email', {'email': email})
+        existing_user = db.fetchone()
+
         if existing_user:
-            flash('An account with this email already exists.')
-            return redirect(url_for('register'))
+            logging.debug(f"User already exists: {email}")
+            db.close()
+            return jsonify({'message': 'An account with this email already exists.'}), 400
 
         password_hash = generate_password_hash(password)
-        conn.execute('INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)',
-                     (username, email, password_hash, role))
-        conn.commit()
-        conn.close()
-        flash('Registration successful! Please log in.')
-        return redirect(url_for('login'))
-    return render_template('register.html')
+        db.execute('INSERT INTO users (username, email, password_hash, role) VALUES (:username, :email, :password_hash, :role)',
+                   {'username': username, 'email': email, 'password_hash': password_hash, 'role': role})
+        db.commit()
+        db.close()
+        logging.debug(f"User registered successfully: {username}")
+        return jsonify({'message': 'Registration successful! Please log in.'}), 201
+    except Exception as e:
+        logging.error(f"Error during registration: {str(e)}")
+        return jsonify({'message': f'Internal server error: {str(e)}'}), 500
 
 @app.route('/login', methods=['POST'])
 def api_login():
@@ -82,90 +146,131 @@ def api_login():
     email = data.get('email')
     password = data.get('password')
 
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE email = %s', (email,)).fetchone()
-    conn.close()
-    if user and check_password_hash(user['password_hash'], password):
-        token = jwt.encode({
-            'user_id': user['id'],
-            'role': user['role'],
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-        }, app.config['SECRET_KEY'], algorithm='HS256')
-        return {'token': token}, 200
-    else:
-        return {'message': 'Invalid email or password.'}, 401
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    flash('You have been logged out.')
-    return redirect(url_for('index'))
+    try:
+        db = DatabaseHelper()
+        db.execute('SELECT id, username, email, password_hash, role FROM users WHERE email = :email', {'email': email})
+        user = db.fetchone()
+        db.close()
+        if user and check_password_hash(user['password_hash'], password):
+            token = jwt.encode({
+                'user_id': user['id'],
+                'username': user['username'],
+                'email': user['email'],
+                'role': user['role'],
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            }, app.config['SECRET_KEY'], algorithm='HS256')
+            return jsonify({'token': token}), 200
+        else:
+            return jsonify({'message': 'Invalid email or password.'}), 401
+    except Exception as e:
+        logging.error(f"Error during login: {str(e)}")
+        return jsonify({'message': f'Internal server error: {str(e)}'}), 500
 
-@app.route('/vacancies')
-def vacancies():
-    conn = get_db_connection()
-    vacancies = conn.execute('SELECT * FROM vacancies ORDER BY created_at DESC').fetchall()
-    conn.close()
-    return render_template('vacancies.html', vacancies=vacancies)
+@app.route('/vacancies', methods=['GET'])
+def get_vacancies():
+    try:
+        db = DatabaseHelper()
+        db.execute('SELECT id, title, description, school_name, user_id, created_at FROM vacancies ORDER BY created_at DESC')
+        vacancies = db.fetchall()
+        db.close()
+        # Convert vacancies to list of dicts
+        vacancies_list = []
+        for vacancy in vacancies:
+            vacancies_list.append({
+                'id': vacancy['id'],
+                'title': vacancy['title'],
+                'description': vacancy['description'],
+                'school_name': vacancy['school_name'],
+                'user_id': vacancy['user_id'],
+                'created_at': vacancy['created_at'].isoformat() if vacancy['created_at'] else None
+            })
+        return jsonify({'vacancies': vacancies_list}), 200
+    except Exception as e:
+        logging.error(f"Error fetching vacancies: {str(e)}")
+        return jsonify({'message': f'Internal server error: {str(e)}'}), 500
 
-@app.route('/vacancy/<int:id>')
-def vacancy_detail(id):
-    conn = get_db_connection()
-    vacancy = conn.execute('SELECT * FROM vacancies WHERE id = ?', (id,)).fetchone()
-    conn.close()
-    if vacancy is None:
-        return render_template('404.html'), 404
-    return render_template('vacancy_detail.html', vacancy=vacancy)
+@app.route('/vacancy/<int:id>', methods=['GET'])
+def get_vacancy(id):
+    try:
+        db = DatabaseHelper()
+        db.execute('SELECT id, title, description, school_name, user_id, created_at FROM vacancies WHERE id = :id', {'id': id})
+        vacancy = db.fetchone()
+        db.close()
+        if vacancy is None:
+            return jsonify({'message': 'Vacancy not found.'}), 404
+        vacancy_dict = {
+            'id': vacancy['id'],
+            'title': vacancy['title'],
+            'description': vacancy['description'],
+            'school_name': vacancy['school_name'],
+            'user_id': vacancy['user_id'],
+            'created_at': vacancy['created_at'].isoformat() if vacancy['created_at'] else None
+        }
+        return jsonify({'vacancy': vacancy_dict}), 200
+    except Exception as e:
+        logging.error(f"Error fetching vacancy: {str(e)}")
+        return jsonify({'message': f'Internal server error: {str(e)}'}), 500
 
-@app.route('/post_vacancy', methods=('GET', 'POST'))
-@login_required
-def post_vacancy():
+@app.route('/post_vacancy', methods=['POST'])
+@token_required
+def post_vacancy(current_user):
     if current_user.role != 'poster':
-        flash('You are not authorized to post vacancies.')
-        return redirect(url_for('index'))
-    if request.method == 'POST':
-        title = request.form['title']
-        description = request.form['description']
-        school_name = request.form['school_name']
+        return jsonify({'message': 'You are not authorized to post vacancies.'}), 403
+    data = request.get_json()
+    title = data.get('title')
+    description = data.get('description')
+    school_name = data.get('school_name')
 
-        conn = get_db_connection()
-        conn.execute('INSERT INTO vacancies (title, description, school_name, user_id) VALUES (?, ?, ?, ?)',
-                     (title, description, school_name, current_user.id))
-        conn.commit()
-        conn.close()
-        flash('Vacancy posted successfully.')
-        return redirect(url_for('vacancies'))
-    return render_template('post_vacancy.html')
+    if not title or not description or not school_name:
+        return jsonify({'message': 'Missing required fields.'}), 400
 
-@app.route('/connect/<int:vacancy_id>', methods=('GET', 'POST'))
-@login_required
-def connect(vacancy_id):
+    try:
+        db = DatabaseHelper()
+        db.execute('INSERT INTO vacancies (title, description, school_name, user_id) VALUES (:title, :description, :school_name, :user_id)',
+                   {'title': title, 'description': description, 'school_name': school_name, 'user_id': current_user.id})
+        db.commit()
+        db.close()
+        return jsonify({'message': 'Vacancy posted successfully.'}), 201
+    except Exception as e:
+        logging.error(f"Error posting vacancy: {str(e)}")
+        return jsonify({'message': f'Internal server error: {str(e)}'}), 500
+
+@app.route('/connect/<int:vacancy_id>', methods=['POST'])
+@token_required
+def connect(current_user, vacancy_id):
     if current_user.role != 'jobseeker':
-        flash('You are not authorized to apply for vacancies.')
-        return redirect(url_for('index'))
-    conn = get_db_connection()
-    vacancy = conn.execute('SELECT * FROM vacancies WHERE id = ?', (vacancy_id,)).fetchone()
-    if vacancy is None:
-        conn.close()
-        flash('Vacancy not found.')
-        return redirect(url_for('vacancies'))
+        return jsonify({'message': 'You are not authorized to apply for vacancies.'}), 403
+    try:
+        db = DatabaseHelper()
+        db.execute('SELECT * FROM vacancies WHERE id = :id', {'id': vacancy_id})
+        vacancy = db.fetchone()
+        if vacancy is None:
+            db.close()
+            return jsonify({'message': 'Vacancy not found.'}), 404
 
-    if request.method == 'POST':
-        message = request.form['message']
-        # In a real application, you would send an email to the vacancy poster
-        flash('Your application has been sent to the school.')
-        conn.close()
-        return redirect(url_for('vacancies'))
+        data = request.get_json()
+        message = data.get('message')
+        if not message:
+            db.close()
+            return jsonify({'message': 'Message is required.'}), 400
 
-    conn.close()
-    return render_template('connect.html', vacancy=vacancy)
+        # In a real application, you would send an email or notification to the vacancy poster
+        db.close()
+        return jsonify({'message': 'Your application has been sent to the school.'}), 200
+    except Exception as e:
+        logging.error(f"Error applying to vacancy: {str(e)}")
+        return jsonify({'message': f'Internal server error: {str(e)}'}), 500
 
 # Error handling
 @app.errorhandler(404)
 def page_not_found(e):
-    return render_template('404.html'), 404
+    return jsonify({'message': 'Resource not found'}), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return jsonify({'message': 'Internal server error'}), 500
 
 # Run the application
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)

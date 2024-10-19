@@ -1,25 +1,36 @@
-import psycopg2
-import os
+import sqlite3
 
-# Establish connection to the PostgreSQL database using environment variables
-conn = psycopg2.connect(
-    host=os.environ.get('PGHOST'),
-    database=os.environ.get('PGDATABASE'),
-    user=os.environ.get('PGUSER'),
-    password=os.environ.get('PGPASSWORD'),
-    port=os.environ.get('PGPORT', 5432)
-)
+def init_sqlite_db():
+    conn = sqlite3.connect('database.db')
+    cursor = conn.cursor()
 
-# Enable autocommit mode for the connection
-conn.autocommit = True
-cursor = conn.cursor()
+    # Create the users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL
+    )
+    ''')
 
-# Execute the schema.sql file to create the necessary tables
-with open('schema.sql', 'r') as f:
-    cursor.execute(f.read())
+    # Create the vacancies table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS vacancies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        school_name TEXT NOT NULL,
+        user_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    ''')
 
-# Close the cursor and the connection
-cursor.close()
-conn.close()
+    conn.commit()
+    conn.close()
+    print("SQLite database initialized successfully!")
 
-print("Database initialized successfully!")
+if __name__ == '__main__':
+    init_sqlite_db()
