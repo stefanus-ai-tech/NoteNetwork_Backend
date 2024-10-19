@@ -7,11 +7,13 @@ from .config import Config
 import os
 from flask_cors import CORS
 import psycopg2
+import jwt
+import datetime
 
 # Initialize the Flask application
 app = Flask(__name__)
 app.config.from_object(Config)
-CORS(app, resources={r"/*": {"origins": "https://your-frontend.vercel.app"}})
+CORS(app, resources={r"/*": {"origins": "https://note-network-frontend.vercel.app/"}})
 
 # Initialize LoginManager
 login_manager = LoginManager()
@@ -74,26 +76,24 @@ def register():
         return redirect(url_for('login'))
     return render_template('register.html')
 
-@app.route('/login', methods=('GET', 'POST'))
-def login():
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
+@app.route('/login', methods=['POST'])
+def api_login():
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
 
-        conn = get_db_connection()
-        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
-        conn.close()
-        if user and check_password_hash(user['password_hash'], password):
-            user_obj = User(user['id'], user['username'], user['email'], user['role'])
-            login_user(user_obj)
-            flash('Logged in successfully.')
-            return redirect(url_for('index'))
-        else:
-            flash('Invalid email or password.')
-    return render_template('login.html')
-
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE email = %s', (email,)).fetchone()
+    conn.close()
+    if user and check_password_hash(user['password_hash'], password):
+        token = jwt.encode({
+            'user_id': user['id'],
+            'role': user['role'],
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+        return {'token': token}, 200
+    else:
+        return {'message': 'Invalid email or password.'}, 401
 @app.route('/logout')
 @login_required
 def logout():
