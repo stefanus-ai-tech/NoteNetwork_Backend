@@ -6,6 +6,7 @@ import sqlite3
 from .config import Config
 import os
 from flask_cors import CORS
+import psycopg2
 
 # Initialize the Flask application
 app = Flask(__name__)
@@ -18,10 +19,19 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 
 # Database connection function
+import psycopg2
+
 def get_db_connection():
-    conn = sqlite3.connect('database.db')
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(
+        host=os.environ.get('PGHOST'),
+        database=os.environ.get('PGDATABASE'),
+        user=os.environ.get('PGUSER'),
+        password=os.environ.get('PGPASSWORD'),
+        port=os.environ.get('PGPORT', 5432)
+    )
+    conn.autocommit = True  # Ensure auto-commit mode
     return conn
+
 
 # User loader callback
 @login_manager.user_loader
